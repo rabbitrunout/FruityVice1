@@ -1,14 +1,24 @@
+// Views/ContentView.swift
 import SwiftUI
-import UIKit
+import PDFKit
+import UIKit     // <-- нужен для UIImage/UIFont/UIActivityViewController
 
 struct ContentView: View {
     @State private var fruits: [Fruit] = []
     @State private var selectedFruit: Fruit? = nil
-    @State private var fruitImages: [String: FruitImageInfo] = [:]
+
+    @State private var fruitImages: [String: UIImage] = [:]
+    @State private var fruitImageInfo: [String: FruitImageInfo] = [:]
+
     @State private var pickerSource: UIImagePickerController.SourceType = .photoLibrary
 
     private var isCameraAvailable: Bool {
         UIImagePickerController.isSourceTypeAvailable(.camera)
+    }
+
+    private var imageInfoURL: URL {
+        FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("FruitImageInfo.json")
     }
 
     var body: some View {
@@ -18,7 +28,7 @@ struct ContentView: View {
                     HStack {
                         Text(fruit.name)
                         Spacer()
-                        if let image = fruitImages[fruit.name]?.image {
+                        if let image = fruitImages[fruit.name] {
                             Image(uiImage: image)
                                 .resizable()
                                 .scaledToFit()
@@ -29,24 +39,26 @@ struct ContentView: View {
                 }
             }
             .navigationTitle("Fruits")
-            .task { await loadFruits() }
             .toolbar {
                 ToolbarItem(placement: .navigationBarTrailing) {
-                    Button("Save PDF Report") {
+                    Button("Save PDF") {
                         savePDFReport()
                     }
                 }
             }
+            .task {
+                await loadFruits()
+                loadSavedImages()
+            }
             .sheet(item: $selectedFruit) { fruit in
                 let binding = Binding<UIImage?>(
-                    get: { fruitImages[fruit.name]?.image },
-                    set: { newImage in
-                        if let img = newImage {
-                            fruitImages[fruit.name] = FruitImageInfo(image: img, date: Date())
+                    get: { fruitImages[fruit.name] },
+                    set: {
+                        if let newImage = $0 {
+                            saveImage(newImage, for: fruit)
                         } else {
-                            fruitImages.removeValue(forKey: fruit.name)
+                            deleteImage(for: fruit)
                         }
-                        saveFruitImagesToDisk()
                     }
                 )
 
@@ -61,146 +73,131 @@ struct ContentView: View {
         }
     }
 
-    // MARK: - Load Fruityvice Data
+    // MARK: - Load Fruits
     func loadFruits() async {
         guard let url = URL(string: "https://www.fruityvice.com/api/fruit/all") else { return }
         do {
             let (data, _) = try await URLSession.shared.data(from: url)
             let decoded = try JSONDecoder().decode([Fruit].self, from: data)
-            DispatchQueue.main.async {
-                fruits = decoded
-                loadFruitImagesFromDisk()
-            }
+            DispatchQueue.main.async { fruits = decoded }
         } catch {
             print("Error loading fruits:", error)
         }
     }
 
-    // MARK: - Persistence
-    func getDocumentsDirectory() -> URL {
-        FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-    }
+    // MARK: - Image Persistence
+    func saveImage(_ image: UIImage, for fruit: Fruit) {
+        guard let data = image.jpegData(compressionQuality: 0.8) else { return }
+        let filename = "\(fruit.name).jpg"
+        let fileURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent(filename)
 
-    func saveFruitImagesToDisk() {
-        var savedData: [String: [String: Any]] = [:]
-
-        for (fruitName, info) in fruitImages {
-            let imageURL = getDocumentsDirectory().appendingPathComponent("\(fruitName).jpg")
-
-            if let image = info.image,
-               let data = image.jpegData(compressionQuality: 0.9) {
-                try? data.write(to: imageURL)
-            }
-
-            savedData[fruitName] = [
-                "imagePath": imageURL.lastPathComponent,
-                "date": info.date.timeIntervalSince1970
-            ]
+        do {
+            try data.write(to: fileURL)
+            fruitImages[fruit.name] = image
+            fruitImageInfo[fruit.name] = FruitImageInfo(filename: filename, date: Date())
+            saveImageInfo()
+        } catch {
+            print("Failed to save image: \(error)")
         }
-
-        UserDefaults.standard.set(savedData, forKey: "SavedFruitImages")
     }
 
-    func loadFruitImagesFromDisk() {
-        guard let savedData = UserDefaults.standard.dictionary(forKey: "SavedFruitImages") as? [String: [String: Any]] else { return }
+    func deleteImage(for fruit: Fruit) {
+        fruitImages[fruit.name] = nil
+        fruitImageInfo[fruit.name] = nil
+        saveImageInfo()
+    }
 
-        var loaded: [String: FruitImageInfo] = [:]
+    func saveImageInfo() {
+        do {
+            let data = try JSONEncoder().encode(fruitImageInfo)
+            try data.write(to: imageInfoURL)
+        } catch {
+            print("Error saving image info:", error)
+        }
+    }
 
-        for (name, dict) in savedData {
-            if let fileName = dict["imagePath"] as? String,
-               let dateTimestamp = dict["date"] as? TimeInterval {
-                let fileURL = getDocumentsDirectory().appendingPathComponent(fileName)
+    func loadSavedImages() {
+        guard let data = try? Data(contentsOf: imageInfoURL),
+              let savedInfo = try? JSONDecoder().decode([String: FruitImageInfo].self, from: data)
+        else { return }
 
-                if let data = try? Data(contentsOf: fileURL),
-                   let image = UIImage(data: data) {
-                    loaded[name] = FruitImageInfo(
-                        image: image,
-                        date: Date(timeIntervalSince1970: dateTimestamp)
-                    )
-                }
+        fruitImageInfo = savedInfo
+
+        for (fruitName, info) in savedInfo {
+            let fileURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+                .appendingPathComponent(info.filename)
+            if let imageData = try? Data(contentsOf: fileURL),
+               let image = UIImage(data: imageData) {
+                fruitImages[fruitName] = image
             }
         }
-
-        fruitImages = loaded
     }
 
-    // MARK: - PDF Report
+    // MARK: - Save PDF Report (with Share Sheet)
     func savePDFReport() {
-        let pdfMetaData = [
-            kCGPDFContextCreator: "FruityVice App",
-            kCGPDFContextAuthor: "Irina Safronova"
+        let pdfMetaData: [CFString: Any] = [
+            kCGPDFContextCreator: "Fruity App",
+            kCGPDFContextAuthor: "Your Name"
         ]
         let format = UIGraphicsPDFRendererFormat()
         format.documentInfo = pdfMetaData as [String: Any]
 
-        let pageWidth = 612.0
-        let pageHeight = 792.0
+        let pageWidth: CGFloat = 612
+        let pageHeight: CGFloat = 792
         let pageRect = CGRect(x: 0, y: 0, width: pageWidth, height: pageHeight)
-
         let renderer = UIGraphicsPDFRenderer(bounds: pageRect, format: format)
 
         let data = renderer.pdfData { context in
             for fruit in fruits {
-                guard let info = fruitImages[fruit.name],
-                      let image = info.image else { continue }
+                guard let image = fruitImages[fruit.name],
+                      let info = fruitImageInfo[fruit.name] else { continue }
 
                 context.beginPage()
 
-                let headerAttrs: [NSAttributedString.Key: Any] = [
-                    .font: UIFont.boldSystemFont(ofSize: 20)
-                ]
-                let bodyAttrs: [NSAttributedString.Key: Any] = [
-                    .font: UIFont.systemFont(ofSize: 14)
+                let textAttributes: [NSAttributedString.Key: Any] = [
+                    .font: UIFont.systemFont(ofSize: 16)
                 ]
 
-                // Заголовок
-                let title = "\(fruit.name)"
-                title.draw(at: CGPoint(x: 20, y: 20), withAttributes: headerAttrs)
+                let formatter = DateFormatter()
+                formatter.dateStyle = .medium
+                formatter.timeStyle = .short
+                let dateString = formatter.string(from: info.date)
 
-                // Текст с данными
-                let df = DateFormatter()
-                df.dateStyle = .medium
-                df.timeStyle = .short
-
-                let details =
-                """
+                let text = """
+                Name: \(fruit.name)
                 Family: \(fruit.family)
-                Calories: \(fruit.nutritions.calories)
-                Carbs: \(fruit.nutritions.carbohydrates)
-                Photo Date: \(df.string(from: info.date))
+                Genus: \(fruit.genus)
+                Order: \(fruit.order)
+                Photo Date: \(dateString)
                 """
+                text.draw(in: CGRect(x: 20, y: 20, width: pageWidth - 40, height: 120),
+                          withAttributes: textAttributes)
 
-                let textRect = CGRect(x: 20, y: 55, width: pageWidth - 40, height: 120)
-                details.draw(in: textRect, withAttributes: bodyAttrs)
-
-                // Картинка
-                let imageMaxWidth = pageWidth - 40
-                let imageMaxHeight = pageHeight - 190
-                let aspect = image.size.width / image.size.height
-
-                var drawW = imageMaxWidth
-                var drawH = drawW / aspect
-                if drawH > imageMaxHeight {
-                    drawH = imageMaxHeight
-                    drawW = drawH * aspect
+                let maxWidth: CGFloat = pageWidth - 40
+                let maxHeight: CGFloat = pageHeight - 200
+                let aspectRatio = image.size.width / image.size.height
+                var imgWidth = maxWidth
+                var imgHeight = imgWidth / aspectRatio
+                if imgHeight > maxHeight {
+                    imgHeight = maxHeight
+                    imgWidth = imgHeight * aspectRatio
                 }
 
-                let imageRect = CGRect(
-                    x: (pageWidth - drawW) / 2,
-                    y: 180,
-                    width: drawW,
-                    height: drawH
+                let imgRect = CGRect(
+                    x: (pageWidth - imgWidth)/2,
+                    y: 150,
+                    width: imgWidth,
+                    height: imgHeight
                 )
-                image.draw(in: imageRect)
+                image.draw(in: imgRect)
             }
         }
 
-        // Share PDF
-        let tempURL = FileManager.default.temporaryDirectory.appendingPathComponent("FruitsReport.pdf")
+        let tempURL = FileManager.default.temporaryDirectory.appendingPathComponent("FruitReport.pdf")
         do {
             try data.write(to: tempURL)
             let activityVC = UIActivityViewController(activityItems: [tempURL], applicationActivities: nil)
-
             if let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
                let rootVC = windowScene.windows.first?.rootViewController {
                 rootVC.present(activityVC, animated: true)
@@ -211,7 +208,7 @@ struct ContentView: View {
     }
 }
 
-// MARK: - Preview
+
 #Preview {
     ContentView()
 }

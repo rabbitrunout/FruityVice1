@@ -1,7 +1,8 @@
+// Models/Fruit.swift
 import Foundation
 
-struct Fruit: Identifiable, Codable {
-    var id = UUID()
+struct Fruit: Codable, Identifiable, Hashable {
+    let id = UUID()              // для List/Identifiable
     let name: String
     let genus: String
     let family: String
@@ -13,7 +14,7 @@ struct Fruit: Identifiable, Codable {
     }
 }
 
-struct Nutrition: Codable {
+struct Nutrition: Codable, Hashable {
     let carbohydrates: Double
     let protein: Double
     let fat: Double

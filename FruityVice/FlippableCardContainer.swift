@@ -1,24 +1,31 @@
+
+//
+
 import SwiftUI
 
 struct FlippableCardContainer: View {
     let fruit: Fruit
 
+    // Bindings from parent
     @Binding var selectedImage: UIImage?
     @Binding var pickerSource: UIImagePickerController.SourceType
     var isCameraAvailable: Bool
 
+    // Local state
     @State private var rotation = 0.0
     @State private var showingImagePicker = false
 
     var body: some View {
         VStack {
             ZStack {
+                // Show front or back depending on rotation (use truncatingRemainder to be robust)
                 if rotation.truncatingRemainder(dividingBy: 360) < 90 ||
                    rotation.truncatingRemainder(dividingBy: 360) > 270 {
-                    frontContent.onTapGesture { flipCard() }
+                    frontContent
+                        .onTapGesture { flipCard() }
                 } else {
                     backContent
-                        .rotation3DEffect(.degrees(180), axis: (x: 0, y: 1, z: 0))
+                        .rotation3DEffect(.degrees(180), axis: (x: 0, y: 1, z: 0)) // un-mirror
                         .onTapGesture { flipCard() }
                 }
             }
@@ -28,10 +35,12 @@ struct FlippableCardContainer: View {
         .frame(height: 350)
         .padding()
         .onAppear {
+            // Ensure rotation is set on the next main-runloop pass so layout happens after state stabilizes
             DispatchQueue.main.async {
                 rotation = 0
             }
         }
+        // Present the picker as a fullScreenCover attached to this container so it shows immediately
         .fullScreenCover(isPresented: $showingImagePicker) {
             ImagePicker(sourceType: pickerSource, selectedImage: $selectedImage)
         }
@@ -96,33 +105,22 @@ struct FlippableCardContainer: View {
 
 // Preview
 #Preview {
-    PreviewWrapper()
-}
+    let sampleFruit = Fruit(
+        name: "Apple",
+        genus: "Malus",
+        family: "Rosaceae",
+        order: "Rosales",
+        nutritions: Nutrition(carbohydrates: 13.81, protein: 0.26, fat: 0.17, calories: 52, sugar: 10.39)
+    )
+    @State var selectedImage: UIImage? = nil
+    @State var pickerSource: UIImagePickerController.SourceType = .photoLibrary
 
-@MainActor
-private struct PreviewWrapper: View {
-    @State private var selectedImage: UIImage? = nil
-    @State private var pickerSource: UIImagePickerController.SourceType = .photoLibrary
-
-    var body: some View {
-        FlippableCardContainer(
-            fruit: Fruit(
-                name: "Apple",
-                genus: "Malus",
-                family: "Rosaceae",
-                order: "Rosales",
-                nutritions: Nutrition(
-                    carbohydrates: 13.81,
-                    protein: 0.26,
-                    fat: 0.17,
-                    calories: 52,
-                    sugar: 10.39
-                )
-            ),
-            selectedImage: $selectedImage,
-            pickerSource: $pickerSource,
-            isCameraAvailable: false
-        )
-        .padding()
-    }
+    return FlippableCardContainer(
+        fruit: sampleFruit,
+        selectedImage: $selectedImage,
+        pickerSource: $pickerSource,
+        isCameraAvailable: false
+    )
+    .previewLayout(.sizeThatFits)
+    .padding()
 }
